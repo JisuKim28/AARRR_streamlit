@@ -35,18 +35,8 @@ st.set_page_config(page_title="Overview", layout="wide")
 st.title("Overview")
 
 # CSV 파일 직접 읽기
-# CSV_PATH = r"C:\Users\jisus\OneDrive\바탕 화면\Python\google_with_cluster3_aha.csv"
-# df = pd.read_csv(CSV_PATH)
-
-CSV_PATH = Path("google_with_cluster3_aha.csv")
-
-# 압축 여부에 따라 자동으로 읽기
-if CSV_PATH.exists():
-    df = pd.read_csv(CSV_PATH)
-elif (CSV_PATH.with_suffix(CSV_PATH.suffix + ".gz")).exists():
-    df = pd.read_csv(CSV_PATH.with_suffix(CSV_PATH.suffix + ".gz"), compression="gzip")
-else:
-    raise FileNotFoundError(f"CSV 파일을 찾을 수 없습니다: {CSV_PATH} 또는 {CSV_PATH}.gz")
+CSV_PATH = r"C:\Users\jisus\OneDrive\바탕 화면\Python\google_with_cluster3_aha.csv"
+df = pd.read_csv(CSV_PATH)
 
 # ---Overview---
 
@@ -1085,4 +1075,5 @@ st.plotly_chart(fig_cu, use_container_width=True, key=ukey("ret-cart-usage"))
 
 
 st.caption("※ 분모=클러스터 인원은 유저 최신 스냅샷(중복 제거)으로 계산합니다. 퍼널/리텐션은 기간 전체 any 기준. 채널은 trafficMedium→trafficMed→trafficSource 우선 사용.")
+
 
