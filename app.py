@@ -1076,63 +1076,117 @@
 
 # st.caption("※ 분모=클러스터 인원은 유저 최신 스냅샷(중복 제거)으로 계산합니다. 퍼널/리텐션은 기간 전체 any 기준. 채널은 trafficMedium→trafficMed→trafficSource 우선 사용.")
 
-# app.py
-
-import os
-import uuid
-from pathlib import Path
-from typing import Optional
+# =========================================================
+# 1) 데이터 로더: 업로드 CSV/ZIP 또는 리포지토리 내 CSV/ZIP (메모리 절약형)
+# =========================================================
 from zipfile import ZipFile
-
-import numpy as np
+from pathlib import Path
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import numpy as np
 import streamlit as st
-from pandas.api.types import is_datetime64tz_dtype
 
-# =========================================================
-# 0) Page Config (파일당 1회)
-# =========================================================
-st.set_page_config(page_title="Google Merchandise Sale Prediction", layout="wide")
-
-
-# =========================================================
-# 1) 데이터 로더: 업로드 CSV/ZIP 또는 리포지토리 내 CSV/ZIP
-# =========================================================
 REPO_CSV = Path(__file__).parent / "google_with_cluster3_aha.csv"
 REPO_ZIP = Path(__file__).parent / "google_with_cluster3_aha.zip"
 
 st.sidebar.header("데이터")
 uploaded = st.sidebar.file_uploader("CSV 또는 ZIP 업로드(선택)", type=["csv", "zip"])
 
-def _load_csv_from_zip(src) -> pd.DataFrame:
-    """ZIP 파일 안에서 첫 번째 CSV를 찾아 읽어온다."""
-    with ZipFile(src) as zf:
-        csv_list = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not csv_list:
-            raise RuntimeError("ZIP 안에서 CSV 파일을 찾지 못했습니다.")
-        target = csv_list[0]
-        with zf.open(target) as f:
-            return pd.read_csv(f)
+# ---- 메모리 절약 설정 ----
+st.sidebar.subheader("메모리 절약 설정")
+lite_mode = st.sidebar.checkbox("메모리 절약 모드(샘플링)", value=True)
+n_rows = st.sidebar.number_input("읽을 최대 행 수 (샘플링)", min_value=10_000, max_value=5_000_000,
+                                 step=10_000, value=500_000)
+downcast_obj_to_cat = st.sidebar.checkbox("문자열을 category로 변환", value=True)
 
-# 우선순위: 업로드 > 리포 CSV > 리포 ZIP
+# 앱에서 실제로 사용하는 컬럼만 지정
+USECOLS = [
+    "fullVisitorId","date","cluster",
+    "visitStartTime","totalTimeOnSite","totalPageviews",
+    "productPagesViewed","addedToCart","AhaMoment",
+    "isFirstVisit","deviceCategory","country",
+    "trafficMedium","trafficMed","trafficSource",
+    "city","City","regionCity"
+]
+
+# 더 작은 dtype으로 지정
+DTYPES = {
+    "fullVisitorId": "string",
+    "cluster": "Int8",
+    "visitStartTime": "Int64",
+    "totalTimeOnSite": "float32",
+    "totalPageviews": "float32",
+    "productPagesViewed": "float32",
+    "addedToCart": "float32",   # 나중에 bool 로직 적용
+    "isFirstVisit": "Int8",
+}
+
+def _read_csv(file_like_or_path):
+    """필요 컬럼만, 작은 dtype으로, (옵션) 샘플링해서 읽기"""
+    # pyarrow 가 있으면 속도/메모리 유리, 없으면 pandas 기본 엔진
+    engine = "pyarrow"
+    try:
+        import pyarrow  # noqa: F401
+    except Exception:
+        engine = "python"
+
+    return pd.read_csv(
+        file_like_or_path,
+        usecols=lambda c: c in USECOLS,
+        dtype=DTYPES,
+        parse_dates=["date"],
+        infer_datetime_format=True,
+        dayfirst=False,
+        nrows=(int(n_rows) if lite_mode else None),
+        engine=engine,
+        on_bad_lines="skip",
+        low_memory=False,
+    )
+
+def _read_from_zip(src):
+    with ZipFile(src) as zf:
+        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        if not names:
+            raise RuntimeError("ZIP 안에서 CSV 파일을 찾지 못했습니다.")
+        with zf.open(names[0]) as f:
+            return _read_csv(f)
+
+# ---- 우선순위: 업로드 > 리포지토리 CSV > 리포지토리 ZIP ----
 if uploaded is not None:
     if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded)
+        df = _read_csv(uploaded)
         st.success("업로드한 CSV를 불러왔습니다.")
     else:
-        df = _load_csv_from_zip(uploaded)
+        df = _read_from_zip(uploaded)
         st.success("업로드한 ZIP에서 CSV를 불러왔습니다.")
 elif REPO_CSV.exists():
-    df = pd.read_csv(REPO_CSV)
+    df = _read_csv(REPO_CSV)
     st.info(f"리포지토리 CSV에서 로드: {REPO_CSV.name}")
 elif REPO_ZIP.exists():
-    df = _load_csv_from_zip(REPO_ZIP)
+    df = _read_from_zip(REPO_ZIP)
     st.info(f"리포지토리 ZIP에서 로드: {REPO_ZIP.name}")
 else:
     st.error("데이터 소스를 찾을 수 없습니다. CSV/ZIP을 업로드하거나 리포지토리에 추가하세요.")
     st.stop()
+
+# ---- 추가 다운캐스트/정리 ----
+# 숫자 downcast
+for c in df.select_dtypes(include=["float64"]).columns:
+    df[c] = pd.to_numeric(df[c], errors="coerce", downcast="float")
+for c in df.select_dtypes(include=["int64"]).columns:
+    df[c] = pd.to_numeric(df[c], errors="coerce", downcast="integer")
+
+# 도시 컬럼 표준화 (city 하나로)
+if "City" in df.columns and "city" not in df.columns:
+    df = df.rename(columns={"City": "city"})
+if "regionCity" in df.columns and "city" not in df.columns:
+    df = df.rename(columns={"regionCity": "city"})
+
+# 문자열 → category (메모리 절감)
+if downcast_obj_to_cat:
+    obj_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+    for c in obj_cols:
+        if c not in {"date", "fullVisitorId"}:
+            df[c] = df[c].astype("category")
 
 if df.empty:
     st.error("빈 데이터입니다."); st.stop()
@@ -1760,4 +1814,5 @@ fig_cu.update_layout(yaxis_tickformat=".1%")
 st.plotly_chart(fig_cu, use_container_width=True, key=ukey("ret-cart-usage"))
 
 st.caption("※ 분모=클러스터 인원은 유저 최신 스냅샷(중복 제거)으로 계산합니다. 퍼널/리텐션은 기간 전체 any 기준. 채널은 trafficMedium→trafficMed→trafficSource 우선 사용.")
+
 
